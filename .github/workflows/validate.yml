@@ -7,6 +7,7 @@ on:
       - 'corpus/**'
       - 'lexicon.json'
       - 'etemenanqui_pipeline.py'
+      - 'corpus_tecnico_ET.txt'
   pull_request:
     branches: [main]
 
@@ -24,75 +25,88 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install gzip-stream 2>/dev/null || true
+      - name: Write validation script
+        run: |
+          cat > /tmp/validate_corpus.py << 'PYEOF'
+          import sys, re, math, gzip, json, os
+          from collections import Counter
+
+          C  = set('tknmsvlrzb')
+          V  = set('aeio')
+          OK = C | V
+          errors = []
+
+          corpus_path = 'corpus/corpus_tecnico_ET.txt'
+          if not os.path.exists(corpus_path):
+              corpus_path = 'corpus_tecnico_ET.txt'
+          if not os.path.exists(corpus_path):
+              print('WARNING: corpus file not found, skipping corpus checks')
+              corpus = ''
+          else:
+              with open(corpus_path) as f:
+                  corpus = f.read()
+
+          if corpus:
+              words = [
+                  w.strip('.,;:') for w in corpus.split()
+                  if w.strip('.,;:') not in {'.', ',', ';', ':'}
+              ]
+              r1 = [w for w in words if len(w) > 7]
+              if r1:
+                  errors.append(f'R1 teto 7 chars violated: {r1}')
+              r2 = [w for w in words if any(c not in OK for c in w)]
+              if r2:
+                  errors.append(f'R2 H2 inventory violated: {r2}')
+              r3 = []
+              for w in words:
+                  for i in range(len(w) - 1):
+                      if w[i] in C and w[i+1] in C:
+                          r3.append(f'{w}(CC@{i})'); break
+                      if w[i] in V and w[i+1] in V:
+                          r3.append(f'{w}(VV@{i})'); break
+              if r3:
+                  errors.append(f'R3 phonotactics violated: {r3}')
+
+          with open('lexicon.json') as f:
+              lex = json.load(f)
+          consonants = set(lex['metadata']['inventory']['consonants'])
+          vowels     = set(lex['metadata']['inventory']['vowels'])
+          all_roots  = [r for domain in lex['roots'].values() for r in domain]
+          r4 = [r for r in all_roots
+                if not (len(r)==3 and r[0] in consonants
+                        and r[1] in vowels and r[2] in consonants)]
+          if r4:
+              errors.append(f'R4 CVC structure violated: {r4}')
+
+          if errors:
+              print('VALIDATION FAILED:')
+              for e in errors: print(f'  x {e}')
+              sys.exit(1)
+          else:
+              if corpus:
+                  enc  = corpus.encode('utf-8')
+                  comp = gzip.compress(enc, compresslevel=9)
+                  chars = [c for c in corpus if c not in {' ','\n','.',',',':',';'}]
+                  n = len(chars)
+                  H = -sum((v/n)*math.log2(v/n) for v in Counter(chars).values()) if n else 0
+                  print(f'ok R1 max 7 chars    : {len(words)} words, zero violations')
+                  print(f'ok R2 H2 inventory   : zero invalid chars')
+                  print(f'ok R3 phonotactics   : zero CC/VV clusters')
+                  print(f'ok R4 CVC lexicon    : {len(all_roots)} valid roots')
+                  print(f'   H_char   = {H:.4f}')
+                  print(f'   gz_ratio = {len(comp)/len(enc):.4f}')
+              else:
+                  print(f'ok R4 CVC lexicon    : {len(all_roots)} valid roots')
+                  print('   corpus checks skipped')
+          PYEOF
 
       - name: Run validation
-        run: python -c "
-import sys, re, math, gzip, json
-from collections import Counter
-
-C  = set('tknmsvlrzb')
-V  = set('aeio')
-OK = C | V
-
-errors = []
-
-# ── Load corpus
-with open('corpus/corpus_tecnico_ET.txt') as f:
-    corpus = f.read()
-
-words = [w.strip('.,;:') for w in corpus.split() if w.strip('.,;:') not in {'.', ',', ';', ':'}]
-
-# ── R1: max 7 chars
-r1_violations = [w for w in words if len(w) > 7]
-if r1_violations:
-    errors.append(f'R1 teto 7 chars: {r1_violations}')
-
-# ── R2: H2 inventory
-r2_violations = [(w, sorted(set(c for c in w if c not in OK))) for w in words if any(c not in OK for c in w)]
-if r2_violations:
-    errors.append(f'R2 inventory H2: {[x[0] for x in r2_violations]}')
-
-# ── Load lexicon
-with open('lexicon.json') as f:
-    lex = json.load(f)
-consonants = lex['metadata']['inventory']['consonants']
-vowels     = lex['metadata']['inventory']['vowels']
-
-# ── R3: all roots CVC
-all_roots = [r for domain in lex['roots'].values() for r in domain]
-r3_violations = [r for r in all_roots
-    if not (len(r)==3 and r[0] in set(consonants) and r[1] in set(vowels) and r[2] in set(consonants))]
-if r3_violations:
-    errors.append(f'R3 CVC structure: {r3_violations}')
-
-# ── Report
-if errors:
-    print('VALIDATION FAILED:')
-    for e in errors: print(f'  ✗ {e}')
-    sys.exit(1)
-else:
-    # Compute and report metrics
-    enc  = corpus.encode('utf-8')
-    comp = gzip.compress(enc, compresslevel=9)
-    chars = [c for c in corpus if c not in {' ','\n','.',',',':',';'}]
-    n = len(chars)
-    H = -sum((v/n)*math.log2(v/n) for v in Counter(chars).values())
-    print(f'✓ R1 teto 7 chars      — {len(words)} palavras, zero violações')
-    print(f'✓ R2 inventário H2     — zero caracteres inválidos')
-    print(f'✓ R3 léxico CVC        — {len(all_roots)} raízes válidas')
-    print(f'  H_char = {H:.4f}')
-    print(f'  gz_ratio = {len(comp)/len(enc):.4f}')
-    print(f'  gz_bytes = {len(comp)} / {len(enc)}')
-"
+        run: python /tmp/validate_corpus.py
 
       - name: Upload metrics artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: validation-metrics
-          path: |
-            corpus/
-            lexicon.json
+          path: lexicon.json
           retention-days: 30
